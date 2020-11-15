@@ -16,9 +16,9 @@ export class Component {
     this.children.push(component)
   }
 
-  get vchildren() {
-    return this.children.map(child => child.vdom)
-  }
+  // get vchildren() {
+  //   return this.children.map(child => child.vdom)
+  // }
 
   // 实际上是个递归调用
   get vdom() {
@@ -27,22 +27,91 @@ export class Component {
 
   [RENDER_TO_DOM](range) {
     this._range = range
-    this.render()[RENDER_TO_DOM](range)
+    // 把 vdom 存起来以便对比更新
+    this._vdom = this.vdom
+    this._vdom[RENDER_TO_DOM](range)
   }
 
-  reRender() {
-    let oldRange = this._range
+  update() {
+    let isSameNode = (oldNode, newNode) => {
+      // 类型不同
+      if (oldNode.type !== newNode.type) {
+        return false
+      }
+      // 属性不同
+      for (let name in newNode.props) {
+        if (newNode.props[name] !== oldNode.props[name]) {
+          return false
+        }
+      }
+      // 属性的数量不同
+      if (Object.keys(oldNode.props).length > Object.keys(newNode.props).length) {
+        return false
+      }
+      if (newNode.type === '#text') {
+        // 文本内容不同
+        if (newNode.content !== oldNode.content) {
+          return false
+        }
+      }
+      return true
+    }
+    let update = (oldNode, newNode) => {
+      // 需要对比的类型：type, props, children
+      // #text content
+      // 只有根节点 type 和 props 完全一致，则认为这个根节点不需要更新
+      // 然后再看子节点是否需要更新
+      // 这里直接用 replace 进行更新，这里用最土的同位置更新
+      if (!isSameNode(oldNode, newNode)) {
+        newNode[RENDER_TO_DOM](oldNode._range)
+        return
+      }
+      // 如果新旧节点一样
+      newNode._range = oldNode._range
 
-    // 需要保证 range 不为空
-    let range = document.createRange()
-    // 把 range 插到之前，起点和终点都是一样的
-    range.setStart(this._range.startContainer, this._range.startOffset)
-    range.setEnd(this._range.startContainer, this._range.startOffset)
-    this[RENDER_TO_DOM](range)
+      let newChildren = newNode.vchildren
+      let oldChildren = oldNode.vchildren
 
-    oldRange.setStart(range.endContainer, range.endOffset)
-    oldRange.deleteContents()
+      if (!newChild || !newChildren.length) {
+        return
+      }
+
+      let tailRange = oldChildren[oldChildren.length - 1]._range
+
+      for (let i = 0; i < newChildren.length; i++) {
+        let newChild = newChildren[i]
+        let oldChild = oldChildren[i]
+        if (i < oldChildren.length) {
+          update(oldChild, newChild)
+        } else {
+          let range = document.createRange()
+          range.setStart(tailRange.endContainer, tailRange.endOffset)
+          range.setEnd(tailRange.endContainer, tailRange.endOffset)
+          newChild[RENDER_TO_DOM](range)
+          tailRange = range
+        }
+      }
+    }
+    let vdom = this.vdom
+    update(this._vdom, vdom)
+    // 更新之后也更新旧的 vdom
+    this._vdom = vdom
   }
+
+  // reRender 退休，不再是重新渲染，而是更新
+  // reRender() {
+  //   let oldRange = this._range
+
+  //   // 需要保证 range 不为空
+  //   let range = document.createRange()
+  //   // 把 range 插到之前，起点和终点都是一样的
+  //   range.setStart(this._range.startContainer, this._range.startOffset)
+  //   range.setEnd(this._range.startContainer, this._range.startOffset)
+  //   this[RENDER_TO_DOM](range)
+
+  //   oldRange.setStart(range.endContainer, range.endOffset)
+  //   oldRange.deleteContents()
+  // }
 
   setState(newState) {
     if (this.state === null || typeof this.state !== 'object') {
@@ -61,7 +130,7 @@ export class Component {
       }
     }
     merge(this.state, newState)
-    this.reRender()
+    this.update()
   }
 }
 
@@ -95,6 +164,8 @@ class ElementWrapper extends Component {
   }*/
 
   get vdom() {
+    // 同样是递归调用
+    this.vchildren = this.children.map(child => child.vdom)
     return this
     /* {
       type: this.type,
@@ -104,7 +175,7 @@ class ElementWrapper extends Component {
   }
 
   [RENDER_TO_DOM](range) {
-    range.deleteContents()
+    this._range = range
 
     let root = document.createElement(this.type)
 
@@ -122,13 +193,18 @@ class ElementWrapper extends Component {
       }
     }
 
-    for (let child of this.children) {
+    if (!this.vchildren) {
+      this.vchildren = this.children.map(child => child.vdom)
+    }
+
+    for (let child of this.vchildren) {
       let childRange = document.createRange()
       childRange.setStart(root, root.childNodes.length)
       childRange.setEnd(root, root.childNodes.length)
       child[RENDER_TO_DOM](childRange)
     }
-    range.insertNode(root)
+
+    replaceContent(range, root)
   }
 }
 
@@ -137,7 +213,6 @@ class TextWrapper extends Component {
     super(content)
     this.type = '#text'
     this.content = content
-    this.root = document.createTextNode(content)
   }
 
   get vdom() {
@@ -149,9 +224,20 @@ class TextWrapper extends Component {
   }
 
   [RENDER_TO_DOM](range) {
-    range.deleteContents()
-    range.insertNode(this.root)
+    this._range = range
+
+    let root = document.createTextNode(this.content)
+    replaceContent(range, root)
   }
+}
+
+function replaceContent(range, node) {
+  range.insertNode(node)
+  range.setStartAfter(node)
+  range.deleteContents()
+  
+  range.setStartBefore(node)
+  range.setEndAfter(node)
 }
 
 export function createElement(type, attributes, ...children) {
